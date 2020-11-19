@@ -1,0 +1,12 @@
+[package]
+name = "rusty-cats"
+version = "0.1.0"
+authors = ["Thom Wright <dev@thomwright.co.uk>"]
+edition = "2018"
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[dependencies]
+swc_common = {version="0.10.5", features=["tty-emitter"]}
+swc_ecma_dep_graph = "0.9.0"
+swc_ecma_parser = "0.43.1"
