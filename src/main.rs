@@ -11,6 +11,8 @@ use swc_ecma_dep_graph::{
 };
 use swc_ecma_parser::{lexer::Lexer, Capturing, Parser, StringInput, Syntax};
 
+type Dependencies = BTreeMap<PathBuf, Vec<CatsDependencyDescriptor>>;
+
 fn main() -> Result<(), std::io::Error> {
     let parser = DependencyParser::new();
 
@@ -19,14 +21,22 @@ fn main() -> Result<(), std::io::Error> {
     let file_path = curr_dir.join(Path::new("test/index.ts")).canonicalize()?;
     println!("{:#?}", file_path);
 
-    let mut all_deps: BTreeMap<PathBuf, Vec<DependencyDescriptor>> =
-        BTreeMap::default();
+    let mut dependencies: Dependencies = BTreeMap::default();
 
-    parser.get_deps_recursively(&mut all_deps, &file_path)?;
+    parser.get_deps_recursively(&mut dependencies, &file_path)?;
 
-    println!("{:#?}", all_deps);
+    print_overview(
+        dependencies,
+        &file_path.parent().expect("root path has no parent"),
+    );
 
     Ok(())
+}
+
+#[derive(Debug, Clone)]
+struct CatsDependencyDescriptor {
+    descriptor: DependencyDescriptor,
+    path: PathBuf,
 }
 
 struct DependencyParser {
@@ -53,7 +63,7 @@ impl DependencyParser {
 
     fn get_deps_recursively(
         &self,
-        mut file_dep_map: &mut BTreeMap<PathBuf, Vec<DependencyDescriptor>>,
+        mut file_dep_map: &mut Dependencies,
         file_path: &PathBuf,
     ) -> Result<(), std::io::Error> {
         // println!("get_deps_recursively: {:#?}", file_path);
@@ -62,45 +72,42 @@ impl DependencyParser {
             return Ok(());
         }
 
-        let deps = self.get_deps(&file_path)?;
-
-        // println!("Got deps for: {:#?}", file_path);
-
-        file_dep_map.insert(file_path.clone(), deps.clone());
-
         let parent = file_path
             .parent()
             .expect("file should have parent directory");
 
-        // println!("Parent: {:#?}", parent);
+        let deps = self.get_deps(&file_path)?;
+
+        let deps: Vec<CatsDependencyDescriptor> = deps
+            .iter()
+            .filter(|dep| {
+                dep.kind == DependencyKind::Import
+                    && (&dep.specifier as &str).starts_with('.')
+            })
+            .map(|dep| {
+                let p: PathBuf = (&dep.specifier as &str).into();
+                let mut p = parent.join(p);
+                if p.is_dir() {
+                    p = p.join("index");
+                }
+                if p.extension().is_none() {
+                    p.set_extension("ts");
+                }
+                // println!("Aliased import: {:#?}", p);
+
+                let p = p.canonicalize().expect("unable to canocicalise path");
+
+                CatsDependencyDescriptor {
+                    descriptor: dep.clone(),
+                    path: p,
+                }
+            })
+            .collect();
+
+        file_dep_map.insert(file_path.clone(), deps.clone());
 
         for dep in deps {
-            match dep.kind {
-                DependencyKind::Import => {
-                    let specifier = String::from(&dep.specifier as &str);
-                    // println!("Import specifier: {:#?}", specifier);
-
-                    if !specifier.starts_with('.') {
-                        continue;
-                    }
-
-                    let p: PathBuf = specifier.into();
-                    let mut p = parent.join(p);
-                    if p.is_dir() {
-                        p = p.join("index");
-                    }
-                    if p.extension().is_none() {
-                        p.set_extension("ts");
-                    }
-                    // println!("Aliased import: {:#?}", p);
-
-                    let p = p.canonicalize()?;
-                    // println!("Canonicalised: {:#?}", p);
-
-                    self.get_deps_recursively(&mut file_dep_map, &p)?;
-                }
-                _ => {}
-            }
+            self.get_deps_recursively(&mut file_dep_map, &dep.path)?;
         }
 
         Ok(())
@@ -113,8 +120,6 @@ impl DependencyParser {
         // println!("get_deps: {:#?}", file_path);
 
         let fm = self.source_map.load_file(&file_path)?;
-
-        // println!("Loaded: {:#?}", file_path);
 
         let comments = SingleThreadedComments::default();
         let lexer = Lexer::new(
@@ -138,5 +143,28 @@ impl DependencyParser {
             .expect("Failed to parse module.");
 
         Ok(analyze_dependencies(&module, &self.source_map, &comments))
+    }
+}
+
+fn print_overview(dependencies: Dependencies, root_path: &Path) {
+    println!("{:#?}", root_path);
+
+    for (k, v) in dependencies.iter() {
+        // FIXME: I expect this might happen in normal use...
+        let file = k
+            .strip_prefix(&root_path)
+            .expect("dependency is not below the root");
+
+        let deps: Vec<PathBuf> = v
+            .iter()
+            .map(|d| {
+                d.path
+                    .strip_prefix(&root_path)
+                    .expect("dependency is not below the root")
+                    .to_owned()
+            })
+            .collect();
+
+        println!("{:#?} {:#?}", file, deps);
     }
 }
